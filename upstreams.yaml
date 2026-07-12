@@ -1,0 +1,21 @@
+# Routes are evaluated top to bottom; the first pattern that matches the
+# request's "model" field wins. Patterns use shell-style globbing (fnmatch).
+#
+# type is a free-form label used for logging/observability, not behavior.
+#
+# auth_header / api_key_env are optional: set both to have the proxy replace
+# that header on the outgoing request with "Bearer <value of api_key_env>".
+# Omit them to pass the client's original auth headers through unchanged
+# (e.g. Claude Code's own ANTHROPIC_API_KEY / OAuth token, for direct
+# Anthropic routes).
+
+routes:
+  - match: "ias-*"
+    type: databricks
+    base_url: "https://your-gateway.com/ai-gateway/anthropic"
+    auth_header: "Authorization"
+    api_key_env: "DATABRICKS_TOKEN"
+
+  - match: "*"
+    type: anthropic
+    base_url: "https://api.anthropic.com"

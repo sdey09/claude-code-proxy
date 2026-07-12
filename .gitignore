@@ -1,0 +1,21 @@
+# SQLite
+data/
+
+# Env — contains secrets
+.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+
+# Docker volumes
+grafana/data/
+
+# macOS
+.DS_Store
+
+# IDE
+.idea/
+*.iml
