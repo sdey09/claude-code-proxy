@@ -24,10 +24,17 @@ from flask import Flask, Response, redirect, request, stream_with_context, url_f
 
 import db
 from config import Config
-from cost import estimate_cost
+from cost import estimate_cost, known_models
 from dashboard import dashboard_bp
 from db import RequestRecord
 from forwarder import Forwarder, filter_headers
+from openai_compat import (
+    OpenAIStreamTranslator,
+    anthropic_error_to_openai,
+    anthropic_response_to_openai,
+    openai_to_anthropic_request,
+    translate_auth_headers,
+)
 from routing import load_routes, resolve_route
 from sse_accumulator import ParsedResponse, parse_json_response, parse_sse_buffer
 
@@ -223,6 +230,151 @@ def _handle(app: Flask, path: str) -> Response:
     return Response(stream_with_context(generate()), status=status, headers=resp_headers)
 
 
+def _handle_openai(app: Flask) -> Response:
+    """OpenAI-Chat-Completions-compatible entry point. Translates to Anthropic's /v1/messages
+    shape, forwards through the same routing/persistence pipeline as _handle, and translates
+    the Anthropic response back to OpenAI's shape."""
+    cfg: Config = app.config["cfg"]
+    fwd: Forwarder = app.forwarder
+    pool = app.db_pool
+
+    timestamp_utc = datetime.now(timezone.utc).isoformat()
+    body = request.get_data()
+
+    try:
+        openai_json = json.loads(body) if body else {}
+    except json.JSONDecodeError:
+        return Response(
+            json.dumps({"error": {"message": "invalid JSON body", "type": "invalid_request_error"}}),
+            status=400, mimetype="application/json",
+        )
+
+    try:
+        anthropic_json = openai_to_anthropic_request(openai_json)
+    except Exception as exc:
+        logger.exception("openai→anthropic request translation failed")
+        return Response(
+            json.dumps({"error": {"message": str(exc), "type": "invalid_request_error"}}),
+            status=400, mimetype="application/json",
+        )
+
+    anthropic_body = json.dumps(anthropic_json).encode()
+    is_stream = bool(anthropic_json.get("stream"))
+    include_usage = bool((openai_json.get("stream_options") or {}).get("include_usage"))
+    model_hint = anthropic_json.get("model") or "?"
+    full_path = "/v1/chat/completions"
+
+    try:
+        route = resolve_route(app.routes, model_hint)
+    except RuntimeError as exc:
+        logger.error("✗ ROUTING FAILED: %s", exc)
+        return Response(
+            json.dumps({"error": {"message": str(exc), "type": "invalid_request_error"}}),
+            status=502, mimetype="application/json",
+        )
+
+    logger.info(
+        "── REQUEST  POST %s (openai-compat)  model=%s  upstream=%s(%s)  stream=%s  body=%db",
+        full_path, model_hint, route.type, route.base_url, is_stream, len(anthropic_body),
+    )
+
+    t_start = time.monotonic()
+    headers = filter_headers(request.headers)
+    if not route.api_key_env:
+        translate_auth_headers(headers)
+    headers["content-type"] = "application/json"
+    headers["content-length"] = str(len(anthropic_body))
+    upstream_url = route.base_url.rstrip("/") + "/v1/messages"
+
+    try:
+        upstream = fwd.forward("POST", upstream_url, headers, anthropic_body, route)
+    except RuntimeError as exc:
+        logger.error("✗ ROUTING FAILED: %s", exc)
+        return Response(
+            json.dumps({"error": {"message": str(exc), "type": "api_error"}}),
+            status=502, mimetype="application/json",
+        )
+    except requests.RequestException as exc:
+        logger.error("✗ UPSTREAM CONNECT FAILED: %s", exc)
+        return Response(
+            json.dumps({"error": {"message": str(exc), "type": "api_error"}}),
+            status=502, mimetype="application/json",
+        )
+
+    status = upstream.status_code
+    content_type = upstream.headers.get("content-type", "")
+    content_encoding = upstream.headers.get("content-encoding", "")
+    is_sse_response = "text/event-stream" in content_type
+
+    logger.info("── UPSTREAM  status=%d  content-type=%s", status, content_type)
+
+    created = int(time.time())
+    state: dict = {"ttfb_s": None, "raw_buffer": []}
+
+    if status >= 400:
+        raw_response = upstream.raw.read(decode_content=False)
+        state["ttfb_s"] = time.monotonic() - t_start
+        state["raw_buffer"].append(raw_response)
+        error_text = _decompress(raw_response, content_encoding).decode(errors="replace")
+        logger.warning("✗ UPSTREAM ERROR  status=%d  path=%s", status, full_path)
+        logger.error("✗ ERROR BODY: %s", error_text[:500])
+        total_s = time.monotonic() - t_start
+        _executor.submit(
+            _persist, cfg=cfg, pool=pool, timestamp_utc=timestamp_utc, path=full_path,
+            is_stream=is_stream, is_sse_response=False, request_body=anthropic_body,
+            request_json=anthropic_json, raw_buffer=state["raw_buffer"], content_encoding=content_encoding,
+            status=status, ttfb_s=state["ttfb_s"], total_s=total_s, error_body=error_text,
+        )
+        return Response(anthropic_error_to_openai(error_text), status=status, mimetype="application/json")
+
+    if is_sse_response:
+        translator = OpenAIStreamTranslator(model=model_hint, created=created, include_usage=include_usage)
+
+        def generate():
+            for chunk in upstream.raw.stream(8192, decode_content=False):
+                if not chunk:
+                    continue
+                if state["ttfb_s"] is None:
+                    state["ttfb_s"] = time.monotonic() - t_start
+                    logger.info("── FIRST BYTE  ttfb=%.3fs", state["ttfb_s"])
+                state["raw_buffer"].append(chunk)
+                out = translator.feed(chunk)
+                if out:
+                    yield out
+
+            total_s = time.monotonic() - t_start
+            _executor.submit(
+                _persist, cfg=cfg, pool=pool, timestamp_utc=timestamp_utc, path=full_path,
+                is_stream=True, is_sse_response=True, request_body=anthropic_body,
+                request_json=anthropic_json, raw_buffer=state["raw_buffer"], content_encoding=content_encoding,
+                status=status, ttfb_s=state["ttfb_s"], total_s=total_s, error_body=None,
+            )
+
+        return Response(
+            stream_with_context(generate()), status=status, mimetype="text/event-stream",
+            headers={"cache-control": "no-cache"},
+        )
+
+    raw_response = upstream.raw.read(decode_content=False)
+    state["ttfb_s"] = time.monotonic() - t_start
+    state["raw_buffer"].append(raw_response)
+    total_s = time.monotonic() - t_start
+    full_raw = _decompress(raw_response, content_encoding)
+    try:
+        openai_resp = anthropic_response_to_openai(json.loads(full_raw), created)
+        out_body = json.dumps(openai_resp).encode()
+    except json.JSONDecodeError:
+        out_body = full_raw
+
+    _executor.submit(
+        _persist, cfg=cfg, pool=pool, timestamp_utc=timestamp_utc, path=full_path,
+        is_stream=False, is_sse_response=False, request_body=anthropic_body,
+        request_json=anthropic_json, raw_buffer=state["raw_buffer"], content_encoding=content_encoding,
+        status=status, ttfb_s=state["ttfb_s"], total_s=total_s, error_body=None,
+    )
+    return Response(out_body, status=status, mimetype="application/json")
+
+
 def create_app(cfg: Config) -> Flask:
     app = Flask(__name__)
     app.config["cfg"] = cfg
@@ -238,6 +390,16 @@ def create_app(cfg: Config) -> Flask:
     @app.route("/")
     def index():
         return redirect(url_for("dashboard.requests_view"))
+
+    @app.route("/v1/chat/completions", methods=["POST"])
+    def openai_chat_completions():
+        return _handle_openai(app)
+
+    @app.route("/v1/models", methods=["GET"])
+    def openai_list_models():
+        now = int(time.time())
+        data = [{"id": name, "object": "model", "created": now, "owned_by": "anthropic"} for name in known_models()]
+        return Response(json.dumps({"object": "list", "data": data}), mimetype="application/json")
 
     @app.route("/<path:path>", methods=["GET", "POST", "PUT", "PATCH", "DELETE"])
     def proxy_handler(path):

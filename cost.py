@@ -58,6 +58,10 @@ def _resolve(model: str) -> ModelCost:
     return _FALLBACK
 
 
+def known_models() -> list[str]:
+    return list(_TABLE.keys())
+
+
 def estimate_cost(
     model: str,
     input_tokens: int,

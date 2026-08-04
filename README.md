@@ -102,6 +102,25 @@ Each proxied request logs which route it took:
 ── REQUEST  POST /v1/messages  model=claude-sonnet-5  upstream=anthropic(https://api.anthropic.com)  stream=false  body=87b
 ```
 
+## OpenAI-compatible endpoint
+
+Any OpenAI-SDK client (aider, LibreChat, custom scripts, ...) can talk to the proxy too, at:
+
+```
+POST http://localhost:8888/v1/chat/completions
+GET  http://localhost:8888/v1/models
+```
+
+Requests are translated OpenAI → Anthropic (`messages`, `system`, `tools`/`tool_choice`,
+`stream`, streaming tool-call deltas, etc.), routed through the same `upstreams.yaml` rules as
+Claude Code traffic, and the Anthropic response is translated back to OpenAI's shape — including
+incremental translation of streamed responses. Requests/responses are captured and costed exactly
+like `/v1/messages` traffic, just tagged with `path=/v1/chat/completions` in the dashboard.
+
+Point an OpenAI client at it with `model` set to whatever `upstreams.yaml` matches (e.g.
+`claude-sonnet-5`), and `OPENAI_API_KEY`/`Authorization: Bearer <key>` — it's translated to
+Anthropic's `x-api-key` header for routes that pass client auth through unchanged.
+
 ## What gets captured
 
 Every API call is stored in Postgres (`requests` table):
@@ -157,6 +176,7 @@ All config via `.env` (or environment variables directly):
 claude-code-local-observability/
 ├── proxy.py                  # Flask app: request handler + proxy entry point
 ├── dashboard.py              # Flask blueprint: request log, detail, cost dashboard
+├── openai_compat.py          # OpenAI Chat Completions ⇄ Anthropic Messages translation
 ├── forwarder.py              # Upstream HTTP client (requests), header handling
 ├── sse_accumulator.py        # SSE stream parser
 ├── db.py                     # Postgres schema + queries (psycopg2)

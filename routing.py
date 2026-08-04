@@ -14,6 +14,7 @@ class Route:
     match: str
     type: str
     base_url: str
+    path: Optional[str] = None
     auth_header: Optional[str] = None
     api_key_env: Optional[str] = None
 
