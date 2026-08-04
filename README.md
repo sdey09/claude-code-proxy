@@ -1,6 +1,8 @@
 # claude-code-local-observability
 
-A local MITM proxy that intercepts Claude Code API calls, captures prompts/responses to SQLite, and emits metrics into a local Grafana stack — without touching the corporate jellyfish observability pipeline.
+A local MITM proxy that intercepts Claude Code API calls, captures prompts/responses to Postgres, and
+serves a custom Flask dashboard for browsing requests and cost/usage — without touching the corporate
+jellyfish observability pipeline.
 
 ## Architecture
 
@@ -8,14 +10,12 @@ A local MITM proxy that intercepts Claude Code API calls, captures prompts/respo
 Claude Code
     │  ANTHROPIC_BASE_URL=http://localhost:8888  (set globally in settings.json)
     ▼
-claude-mitm-proxy  (aiohttp, port 8888)
+claude-mitm-proxy  (Flask, port 8888)
     │
     ├── routes by model (upstreams.yaml) ──▶  Databricks AI Gateway or api.anthropic.com
-    ├── dual-write SSE stream ──▶  Claude Code (zero latency overhead)
-    ├── captures to SQLite  (data/claude-proxy.db)
-    └── emits OTLP metrics ──▶  OTel Collector :4318
-                                    └──▶  Prometheus :9090
-                                              └──▶  Grafana :3000
+    ├── dual-write streaming response ──▶  Claude Code (zero latency overhead)
+    ├── captures to Postgres (async, background thread pool)
+    └── serves /dashboard  ──▶  request log, request detail, cost & usage charts
 ```
 
 ## Quick Start
@@ -29,16 +29,16 @@ cp .env.example .env
 `upstreams.yaml` maps model-name patterns to upstreams — edit it to point at your
 Databricks AI Gateway, api.anthropic.com, or both. See [Routing](#routing) below.
 
-### 2. Start the observability stack
+### 2. Start Postgres
 
 ```bash
 cd ~/Documents/dx/dev-scripts/claude-code-local-observability
 make up
 ```
 
-- Grafana:    http://localhost:3000  (admin/admin)
-- Prometheus: http://localhost:9090
-- OTel:       http://localhost:4318
+- Proxy:     http://localhost:8888
+- Dashboard: http://localhost:8888/dashboard/requests
+- Postgres:  localhost:5432 (claude/claude, db=claude_proxy)
 
 ### 3. Start the proxy
 
@@ -49,7 +49,7 @@ uv run proxy.py
 
 The proxy reads its config from `.env` and its routing table from `upstreams.yaml` automatically — no need to pass env vars manually.
 
-Or use the convenience script (starts stack + proxy together):
+Or use the convenience script (starts Postgres + proxy together):
 
 ```bash
 ./start.sh
@@ -104,10 +104,10 @@ Each proxied request logs which route it took:
 
 ## What gets captured
 
-Every API call is stored in `data/claude-proxy.db`:
+Every API call is stored in Postgres (`requests` table):
 
 ```bash
-sqlite3 data/claude-proxy.db \
+psql "$DATABASE_URL" -c \
   "SELECT timestamp_utc, model, input_tokens, output_tokens, cost_usd, stop_reason
    FROM requests ORDER BY id DESC LIMIT 10;"
 ```
@@ -125,21 +125,17 @@ sqlite3 data/claude-proxy.db \
 | `ttfb_s` | Time to first byte (seconds) |
 | `total_s` | Total request duration (seconds) |
 | `request_body` | Full prompt payload (JSON) |
-| `response_body` | Full response SSE events (JSON) |
+| `response_body` | Full response body/events (JSON) |
 
-## Metrics in Grafana
+## Dashboard
 
-The proxy emits these metrics to Prometheus (all prefixed `claude_proxy_*`):
+Open http://localhost:8888/dashboard/requests for the custom UI:
 
-| Metric | Type | Labels |
-|--------|------|--------|
-| `claude_proxy_request_total` | counter | `model`, `status_code` |
-| `claude_proxy_request_duration` | histogram | `model` |
-| `claude_proxy_input_tokens_total` | counter | `model`, `cache_type` |
-| `claude_proxy_output_tokens_total` | counter | `model` |
-| `claude_proxy_cost_usd_total` | counter | `model` |
-
-Open Grafana at http://localhost:3000 → Dashboards → **Claude Proxy — Request Inspector**.
+| Page | What it shows |
+|------|----------------|
+| `/dashboard/requests` | Filterable, paginated table of captured requests (model, status, tokens, cost, timing) |
+| `/dashboard/requests/<id>` | Full request/response JSON for a single call |
+| `/dashboard/costs` | Summary stats, cost-over-time chart, and cost-by-model breakdown |
 
 ## Configuration
 
@@ -150,9 +146,7 @@ All config via `.env` (or environment variables directly):
 | `UPSTREAM_ROUTES_FILE` | `upstreams.yaml` | Path to the routing table |
 | `DATABRICKS_TOKEN` | *(unset)* | Used by routes with `api_key_env: DATABRICKS_TOKEN` |
 | `PROXY_PORT` | `8888` | Proxy listening port |
-| `DB_PATH` | `./data/claude-proxy.db` | SQLite database path |
-| `OTEL_ENDPOINT` | `http://localhost:4318` | OTel collector HTTP endpoint |
-| `OTEL_EXPORT_INTERVAL_MS` | `30000` | Metrics export interval |
+| `DATABASE_URL` | `postgresql://claude:claude@localhost:5432/claude_proxy` | Postgres connection string |
 | `MAX_BODY_STORE_BYTES` | `524288` | Max request/response body size to store |
 | `PROXY_SSL_VERIFY` | `true` | Set to `false` to skip TLS verification |
 | `LOG_LEVEL` | `INFO` | Python log level |
@@ -161,23 +155,20 @@ All config via `.env` (or environment variables directly):
 
 ```
 claude-code-local-observability/
-├── proxy.py                  # Main aiohttp app + request handler
-├── forwarder.py              # Upstream HTTP client, header handling
+├── proxy.py                  # Flask app: request handler + proxy entry point
+├── dashboard.py              # Flask blueprint: request log, detail, cost dashboard
+├── forwarder.py              # Upstream HTTP client (requests), header handling
 ├── sse_accumulator.py        # SSE stream parser
-├── db.py                     # SQLite schema + async writes
-├── metrics.py                # OTLP metrics emission
+├── db.py                     # Postgres schema + queries (psycopg2)
 ├── cost.py                   # Token → USD cost table
 ├── config.py                 # Environment variable config
 ├── routing.py                # Model → upstream routing table
 ├── upstreams.yaml            # Routing rules (Databricks, Anthropic, ...)
-├── start.sh                  # Convenience script: starts stack + proxy
+├── templates/                # Dashboard Jinja templates
+├── static/                   # Dashboard CSS
+├── start.sh                  # Convenience script: starts Postgres + proxy
 ├── .env                      # Local config (gitignored)
 ├── .env.example              # Template
-├── docker-compose.yml        # Grafana + Prometheus + Loki + OTel stack
-├── otel-collector-config.yaml
-├── prometheus.yml
-├── data/                     # SQLite DB (gitignored)
-└── grafana/
-    ├── dashboards/
-    └── provisioning/
+├── docker-compose.yml        # Postgres + proxy
+└── data/                     # Legacy SQLite DB from a prior version (unused, gitignored)
 ```

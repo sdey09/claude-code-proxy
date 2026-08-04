@@ -10,9 +10,8 @@ proxy:
 up:
 	docker compose up -d --build
 	@echo "Proxy:      http://localhost:8888"
-	@echo "Grafana:    http://localhost:3000  (admin/admin)"
-	@echo "Prometheus: http://localhost:9090"
-	@echo "Loki:       http://localhost:3100"
+	@echo "Dashboard:  http://localhost:8888/dashboard/requests"
+	@echo "Postgres:   localhost:5432  (claude/claude, db=claude_proxy)"
 
 down:
 	docker compose down

@@ -1,29 +1,31 @@
 from __future__ import annotations
 
-import json
 import logging
-from dataclasses import dataclass, asdict
+from contextlib import contextmanager
+from dataclasses import asdict, dataclass
 from typing import Optional
 
-import aiosqlite
+import psycopg2
+import psycopg2.extras
+from psycopg2.pool import ThreadedConnectionPool
 
 logger = logging.getLogger(__name__)
 
 _CREATE_TABLE = """
 CREATE TABLE IF NOT EXISTS requests (
-    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    id                  SERIAL PRIMARY KEY,
     request_id          TEXT,
-    timestamp_utc       TEXT NOT NULL,
+    timestamp_utc       TIMESTAMPTZ NOT NULL,
     model               TEXT,
     path                TEXT,
-    stream              INTEGER,
-    ttfb_s              REAL,
-    total_s             REAL,
+    stream              BOOLEAN,
+    ttfb_s              DOUBLE PRECISION,
+    total_s             DOUBLE PRECISION,
     input_tokens        INTEGER,
     output_tokens       INTEGER,
     cache_write_tokens  INTEGER,
     cache_read_tokens   INTEGER,
-    cost_usd            REAL,
+    cost_usd            DOUBLE PRECISION,
     stop_reason         TEXT,
     request_body        TEXT,
     response_body       TEXT,
@@ -56,15 +58,34 @@ class RequestRecord:
     status_code: Optional[int]
 
 
-async def init_db(db_path: str) -> aiosqlite.Connection:
-    conn = await aiosqlite.connect(db_path)
-    await conn.executescript("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")
-    await conn.executescript(_CREATE_TABLE)
-    await conn.commit()
-    return conn
+def get_pool(database_url: str) -> ThreadedConnectionPool:
+    return ThreadedConnectionPool(1, 10, dsn=database_url)
 
 
-async def insert_record(conn: aiosqlite.Connection, rec: RequestRecord, max_body_bytes: int) -> None:
+def close_pool(pool: ThreadedConnectionPool) -> None:
+    pool.closeall()
+
+
+@contextmanager
+def _conn(pool: ThreadedConnectionPool):
+    conn = pool.getconn()
+    try:
+        yield conn
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        pool.putconn(conn)
+
+
+def init_db(pool: ThreadedConnectionPool) -> None:
+    with _conn(pool) as conn:
+        with conn.cursor() as cur:
+            cur.execute(_CREATE_TABLE)
+
+
+def insert_record(pool: ThreadedConnectionPool, rec: RequestRecord, max_body_bytes: int) -> None:
     def _trunc(s: Optional[str]) -> Optional[str]:
         if s is None:
             return None
@@ -72,36 +93,139 @@ async def insert_record(conn: aiosqlite.Connection, rec: RequestRecord, max_body
             return s.encode()[:max_body_bytes].decode(errors="replace") + "…[truncated]"
         return s
 
-    try:
-        await conn.execute(
-            """
-            INSERT INTO requests (
-                request_id, timestamp_utc, model, path, stream,
-                ttfb_s, total_s,
-                input_tokens, output_tokens, cache_write_tokens, cache_read_tokens,
-                cost_usd, stop_reason,
-                request_body, response_body, error_body, status_code
-            ) VALUES (
-                :request_id, :timestamp_utc, :model, :path, :stream,
-                :ttfb_s, :total_s,
-                :input_tokens, :output_tokens, :cache_write_tokens, :cache_read_tokens,
-                :cost_usd, :stop_reason,
-                :request_body, :response_body, :error_body, :status_code
-            )
-            """,
-            {
-                **asdict(rec),
-                "stream": int(rec.stream),
-                "request_body": _trunc(rec.request_body),
-                "response_body": _trunc(rec.response_body),
-            },
+    data = asdict(rec)
+    data["request_body"] = _trunc(rec.request_body)
+    data["response_body"] = _trunc(rec.response_body)
+
+    sql = """
+        INSERT INTO requests (
+            request_id, timestamp_utc, model, path, stream,
+            ttfb_s, total_s,
+            input_tokens, output_tokens, cache_write_tokens, cache_read_tokens,
+            cost_usd, stop_reason,
+            request_body, response_body, error_body, status_code
+        ) VALUES (
+            %(request_id)s, %(timestamp_utc)s, %(model)s, %(path)s, %(stream)s,
+            %(ttfb_s)s, %(total_s)s,
+            %(input_tokens)s, %(output_tokens)s, %(cache_write_tokens)s, %(cache_read_tokens)s,
+            %(cost_usd)s, %(stop_reason)s,
+            %(request_body)s, %(response_body)s, %(error_body)s, %(status_code)s
         )
-        await conn.commit()
+    """
+    try:
+        with _conn(pool) as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, data)
     except Exception:
         logger.exception("Failed to insert request record")
 
 
-async def row_count(conn: aiosqlite.Connection) -> int:
-    async with conn.execute("SELECT COUNT(*) FROM requests") as cur:
-        row = await cur.fetchone()
-        return row[0] if row else 0
+def list_requests(
+    pool: ThreadedConnectionPool,
+    limit: int = 50,
+    offset: int = 0,
+    model: Optional[str] = None,
+    status: Optional[int] = None,
+) -> list[dict]:
+    where = []
+    params: list = []
+    if model:
+        where.append("model = %s")
+        params.append(model)
+    if status:
+        where.append("status_code = %s")
+        params.append(status)
+    where_sql = ("WHERE " + " AND ".join(where)) if where else ""
+    sql = f"""
+        SELECT id, request_id, timestamp_utc, model, path, stream, ttfb_s, total_s,
+               input_tokens, output_tokens, cache_write_tokens, cache_read_tokens,
+               cost_usd, stop_reason, status_code
+        FROM requests
+        {where_sql}
+        ORDER BY id DESC
+        LIMIT %s OFFSET %s
+    """
+    params += [limit, offset]
+    with _conn(pool) as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(sql, params)
+            return list(cur.fetchall())
+
+
+def count_requests(pool: ThreadedConnectionPool, model: Optional[str] = None, status: Optional[int] = None) -> int:
+    where = []
+    params: list = []
+    if model:
+        where.append("model = %s")
+        params.append(model)
+    if status:
+        where.append("status_code = %s")
+        params.append(status)
+    where_sql = ("WHERE " + " AND ".join(where)) if where else ""
+    with _conn(pool) as conn:
+        with conn.cursor() as cur:
+            cur.execute(f"SELECT COUNT(*) FROM requests {where_sql}", params)
+            row = cur.fetchone()
+            return row[0] if row else 0
+
+
+def get_request(pool: ThreadedConnectionPool, req_id: int) -> Optional[dict]:
+    with _conn(pool) as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("SELECT * FROM requests WHERE id = %s", (req_id,))
+            row = cur.fetchone()
+            return dict(row) if row else None
+
+
+def distinct_models(pool: ThreadedConnectionPool) -> list[str]:
+    with _conn(pool) as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT DISTINCT model FROM requests WHERE model IS NOT NULL ORDER BY model")
+            return [r[0] for r in cur.fetchall()]
+
+
+def cost_summary(pool: ThreadedConnectionPool) -> dict:
+    with _conn(pool) as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("""
+                SELECT COUNT(*) AS request_count,
+                       COALESCE(SUM(cost_usd), 0) AS total_cost,
+                       COALESCE(SUM(input_tokens), 0) AS total_input_tokens,
+                       COALESCE(SUM(output_tokens), 0) AS total_output_tokens
+                FROM requests
+            """)
+            return dict(cur.fetchone())
+
+
+def cost_by_model(pool: ThreadedConnectionPool) -> list[dict]:
+    with _conn(pool) as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("""
+                SELECT model,
+                       COUNT(*) AS request_count,
+                       COALESCE(SUM(cost_usd), 0) AS total_cost,
+                       COALESCE(SUM(input_tokens), 0) AS total_input_tokens,
+                       COALESCE(SUM(output_tokens), 0) AS total_output_tokens
+                FROM requests
+                GROUP BY model
+                ORDER BY total_cost DESC
+            """)
+            return list(cur.fetchall())
+
+
+def cost_over_time(pool: ThreadedConnectionPool, days: int = 14) -> list[dict]:
+    with _conn(pool) as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT date_trunc('day', timestamp_utc) AS day,
+                       COALESCE(SUM(cost_usd), 0) AS total_cost,
+                       COUNT(*) AS request_count
+                FROM requests
+                WHERE timestamp_utc > now() - (%s || ' days')::interval
+                GROUP BY day
+                ORDER BY day
+                """,
+                (days,),
+            )
+            return list(cur.fetchall())

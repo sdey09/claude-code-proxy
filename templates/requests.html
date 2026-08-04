@@ -1,0 +1,61 @@
+{% extends "base.html" %}
+{% block title %}Requests — Claude Proxy{% endblock %}
+{% block content %}
+<h1>Requests</h1>
+
+<form method="get" class="filters">
+  <select name="model" onchange="this.form.submit()">
+    <option value="">All models</option>
+    {% for m in models %}
+      <option value="{{ m }}" {% if m == selected_model %}selected{% endif %}>{{ m }}</option>
+    {% endfor %}
+  </select>
+  <select name="status" onchange="this.form.submit()">
+    <option value="">All statuses</option>
+    {% for s in ["200", "400", "401", "429", "500", "502"] %}
+      <option value="{{ s }}" {% if s == selected_status %}selected{% endif %}>{{ s }}</option>
+    {% endfor %}
+  </select>
+</form>
+
+<p class="meta">{{ total }} request{{ "s" if total != 1 else "" }}</p>
+
+<div class="table-wrap">
+<table class="req-table">
+  <thead>
+    <tr>
+      <th>Time (UTC)</th><th>Model</th><th>Status</th><th>In</th><th>Out</th>
+      <th>Cache R/W</th><th>Cost</th><th>TTFB</th><th>Total</th><th>Stop reason</th>
+    </tr>
+  </thead>
+  <tbody>
+  {% for r in rows %}
+    <tr class="{{ 'err' if r.status_code and r.status_code >= 400 else '' }}">
+      <td><a href="{{ url_for('dashboard.request_detail', req_id=r.id) }}">{{ r.timestamp_utc.strftime('%Y-%m-%d %H:%M:%S') }}</a></td>
+      <td>{{ r.model or '—' }}</td>
+      <td>{{ r.status_code or '—' }}</td>
+      <td>{{ r.input_tokens }}</td>
+      <td>{{ r.output_tokens }}</td>
+      <td>{{ r.cache_read_tokens }}/{{ r.cache_write_tokens }}</td>
+      <td>${{ "%.4f"|format(r.cost_usd or 0) }}</td>
+      <td>{{ "%.3fs"|format(r.ttfb_s) if r.ttfb_s is not none else '—' }}</td>
+      <td>{{ "%.2fs"|format(r.total_s) if r.total_s is not none else '—' }}</td>
+      <td>{{ r.stop_reason or '—' }}</td>
+    </tr>
+  {% else %}
+    <tr><td colspan="10" class="empty">No requests captured yet.</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+
+<div class="pagination">
+  {% if page > 1 %}
+    <a href="?page={{ page - 1 }}&model={{ selected_model }}&status={{ selected_status }}">← Prev</a>
+  {% endif %}
+  <span>Page {{ page }} / {{ total_pages }}</span>
+  {% if page < total_pages %}
+    <a href="?page={{ page + 1 }}&model={{ selected_model }}&status={{ selected_status }}">Next →</a>
+  {% endif %}
+</div>
+{% endblock %}

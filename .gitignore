@@ -1,4 +1,4 @@
-# SQLite
+# Legacy SQLite data (unused now that Postgres is the store)
 data/
 
 # Env — contains secrets
@@ -9,9 +9,6 @@ __pycache__/
 *.pyc
 *.pyo
 .venv/
-
-# Docker volumes
-grafana/data/
 
 # macOS
 .DS_Store

@@ -3,106 +3,44 @@ networks:
     driver: bridge
 
 volumes:
-  prometheus-data:
-  loki-data:
-  grafana-data:
+  postgres-data:
 
 services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: claude-postgres
+    environment:
+      - POSTGRES_USER=claude
+      - POSTGRES_PASSWORD=claude
+      - POSTGRES_DB=claude_proxy
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:5432:5432"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U claude -d claude_proxy"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - obs-network
+
   proxy:
     build: .
     container_name: claude-proxy
     env_file:
       - .env
     environment:
-      - OTEL_ENDPOINT=http://otel-collector:4318
-      - DB_PATH=/app/data/claude-proxy.db
+      - DATABASE_URL=postgresql://claude:claude@postgres:5432/claude_proxy
       - UPSTREAM_ROUTES_FILE=/app/upstreams.yaml
     volumes:
-      - ./data:/app/data
       - ./upstreams.yaml:/app/upstreams.yaml:ro
     ports:
       - "${PROXY_PORT:-8888}:8888"
     restart: unless-stopped
     depends_on:
-      - otel-collector
-    networks:
-      - obs-network
-
-  sqlite-web:
-    image: coleifer/sqlite-web
-    container_name: claude-sqlite-web
-    command: ["sqlite_web", "-H", "0.0.0.0", "-r", "/data/claude-proxy.db"]
-    volumes:
-      - ./data:/data:ro
-    ports:
-      - "127.0.0.1:8081:8080"
-    restart: unless-stopped
-    networks:
-      - obs-network
-
-  otel-collector:
-    image: otel/opentelemetry-collector-contrib:latest
-    container_name: claude-otel-collector
-    command: ["--config=/etc/otel/config.yaml"]
-    volumes:
-      - ./otel-collector-config.yaml:/etc/otel/config.yaml:ro
-    ports:
-      - "4317:4317"   # OTLP gRPC
-      - "4318:4318"   # OTLP HTTP
-      - "8889:8889"   # Prometheus scrape endpoint
-    restart: unless-stopped
-    networks:
-      - obs-network
-
-  prometheus:
-    image: prom/prometheus:latest
-    container_name: claude-prometheus
-    volumes:
-      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
-      - prometheus-data:/prometheus
-    ports:
-      - "9090:9090"
-    command:
-      - "--config.file=/etc/prometheus/prometheus.yml"
-      - "--storage.tsdb.path=/prometheus"
-      - "--storage.tsdb.retention.time=90d"
-      - "--web.enable-lifecycle"
-    restart: unless-stopped
-    depends_on:
-      - otel-collector
-    networks:
-      - obs-network
-
-  loki:
-    image: grafana/loki:latest
-    container_name: claude-loki
-    ports:
-      - "3100:3100"
-    command: -config.file=/etc/loki/local-config.yaml
-    volumes:
-      - loki-data:/loki
-    restart: unless-stopped
-    networks:
-      - obs-network
-
-  grafana:
-    image: grafana/grafana-oss:latest
-    container_name: claude-grafana
-    environment:
-      - GF_SECURITY_ADMIN_USER=admin
-      - GF_SECURITY_ADMIN_PASSWORD=admin
-      - GF_USERS_ALLOW_SIGN_UP=false
-      - GF_FEATURE_TOGGLES_ENABLE=logsSampleInExplore
-    volumes:
-      - grafana-data:/var/lib/grafana
-      - ./grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
-      - ./grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
-      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
-    ports:
-      - "3000:3000"
-    restart: unless-stopped
-    depends_on:
-      - prometheus
-      - loki
+      postgres:
+        condition: service_healthy
     networks:
       - obs-network

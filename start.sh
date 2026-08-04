@@ -7,8 +7,8 @@ cd "$SCRIPT_DIR"
 # Load .env
 export $(grep -v '^#' .env | xargs)
 
-echo "Starting observability stack..."
-docker compose up -d
+echo "Starting Postgres..."
+docker compose up -d postgres
 
 echo "Starting proxy on :${PROXY_PORT:-8888}..."
 uv run proxy.py &
@@ -16,6 +16,7 @@ PROXY_PID=$!
 
 echo ""
 echo "Proxy running (PID $PROXY_PID)"
+echo "Dashboard: http://localhost:${PROXY_PORT:-8888}/dashboard/requests"
 echo "Now launch Claude Code with:"
 echo ""
 echo "  ANTHROPIC_BASE_URL=http://localhost:${PROXY_PORT:-8888} claude"
