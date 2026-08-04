@@ -29,11 +29,18 @@ from dashboard import dashboard_bp
 from db import RequestRecord
 from forwarder import Forwarder, filter_headers
 from openai_compat import (
+    AnthropicStreamTranslator,
     OpenAIStreamTranslator,
     anthropic_error_to_openai,
     anthropic_response_to_openai,
+    anthropic_to_openai_request,
+    openai_error_to_anthropic,
+    openai_response_to_anthropic,
     openai_to_anthropic_request,
+    parse_openai_json_response,
+    parse_openai_sse_buffer,
     translate_auth_headers,
+    translate_auth_headers_to_openai,
 )
 from routing import load_routes, resolve_route
 from sse_accumulator import ParsedResponse, parse_json_response, parse_sse_buffer
@@ -70,14 +77,19 @@ def _persist(
     ttfb_s: Optional[float],
     total_s: float,
     error_body: Optional[str],
+    upstream_protocol: str,
 ) -> None:
     full_raw = _decompress(b"".join(raw_buffer), content_encoding)
 
     if is_sse_response:
-        parsed: ParsedResponse = parse_sse_buffer(full_raw)
+        parsed: ParsedResponse = (
+            parse_openai_sse_buffer(full_raw) if upstream_protocol == "openai" else parse_sse_buffer(full_raw)
+        )
         response_body_str = json.dumps(parsed.raw_events)
     else:
-        parsed = parse_json_response(full_raw)
+        parsed = (
+            parse_openai_json_response(full_raw) if upstream_protocol == "openai" else parse_json_response(full_raw)
+        )
         response_body_str = full_raw.decode(errors="replace") if full_raw else None
 
     model = parsed.model
@@ -153,6 +165,17 @@ def _handle(app: Flask, path: str) -> Response:
         logger.error("✗ ROUTING FAILED: %s", exc)
         return Response(str(exc), status=502)
 
+    translate = (
+        route.protocol == "openai"
+        and request.method == "POST"
+        and request_json is not None
+        and "messages" in request_json
+    )
+    if translate:
+        return _handle_anthropic_over_openai_upstream(
+            app, route, timestamp_utc, body, request_json, full_path, model_hint, is_stream,
+        )
+
     logger.info(
         "── REQUEST  %s %s  model=%s  upstream=%s(%s)  stream=%s  body=%db",
         request.method, full_path, model_hint, route.type, route.base_url, is_stream, len(body),
@@ -225,9 +248,137 @@ def _handle(app: Flask, path: str) -> Response:
             ttfb_s=state["ttfb_s"],
             total_s=total_s,
             error_body=state["error_body"],
+            upstream_protocol="anthropic",
         )
 
     return Response(stream_with_context(generate()), status=status, headers=resp_headers)
+
+
+def _handle_anthropic_over_openai_upstream(
+    app: Flask,
+    route,
+    timestamp_utc: str,
+    body: bytes,
+    request_json: dict,
+    full_path: str,
+    model_hint: str,
+    is_stream: bool,
+) -> Response:
+    """Anthropic-shaped client (Claude Code) routed to an openai-protocol upstream: translate
+    the request out to OpenAI's shape, forward to <base_url>/v1/chat/completions, translate the
+    response back to Anthropic's shape."""
+    cfg: Config = app.config["cfg"]
+    fwd: Forwarder = app.forwarder
+    pool = app.db_pool
+
+    try:
+        openai_json = anthropic_to_openai_request(request_json)
+    except Exception as exc:
+        logger.exception("anthropic→openai request translation failed")
+        return Response(
+            json.dumps({"type": "error", "error": {"type": "invalid_request_error", "message": str(exc)}}),
+            status=400, mimetype="application/json",
+        )
+
+    openai_body = json.dumps(openai_json).encode()
+    upstream_path = "/v1/chat/completions"
+
+    logger.info(
+        "── REQUEST  POST %s (anthropic-over-openai)  model=%s  upstream=%s(%s)  stream=%s  body=%db",
+        full_path, model_hint, route.type, route.base_url, is_stream, len(openai_body),
+    )
+
+    t_start = time.monotonic()
+    headers = filter_headers(request.headers)
+    if not route.api_key_env:
+        translate_auth_headers_to_openai(headers)
+    headers["content-type"] = "application/json"
+    headers["content-length"] = str(len(openai_body))
+    upstream_url = route.base_url.rstrip("/") + upstream_path
+
+    try:
+        upstream = fwd.forward("POST", upstream_url, headers, openai_body, route)
+    except RuntimeError as exc:
+        logger.error("✗ ROUTING FAILED: %s", exc)
+        return Response(str(exc), status=502)
+    except requests.RequestException as exc:
+        logger.error("✗ UPSTREAM CONNECT FAILED: %s", exc)
+        return Response(str(exc), status=502)
+
+    status = upstream.status_code
+    content_type = upstream.headers.get("content-type", "")
+    content_encoding = upstream.headers.get("content-encoding", "")
+    is_sse_response = "text/event-stream" in content_type
+
+    logger.info("── UPSTREAM  status=%d  content-type=%s", status, content_type)
+
+    state: dict = {"ttfb_s": None, "raw_buffer": []}
+
+    if status >= 400:
+        raw_response = upstream.raw.read(decode_content=False)
+        state["ttfb_s"] = time.monotonic() - t_start
+        state["raw_buffer"].append(raw_response)
+        error_text = _decompress(raw_response, content_encoding).decode(errors="replace")
+        logger.warning("✗ UPSTREAM ERROR  status=%d  path=%s", status, full_path)
+        logger.error("✗ ERROR BODY: %s", error_text[:500])
+        total_s = time.monotonic() - t_start
+        _executor.submit(
+            _persist, cfg=cfg, pool=pool, timestamp_utc=timestamp_utc, path=full_path,
+            is_stream=is_stream, is_sse_response=False, request_body=openai_body,
+            request_json=openai_json, raw_buffer=state["raw_buffer"], content_encoding=content_encoding,
+            status=status, ttfb_s=state["ttfb_s"], total_s=total_s, error_body=error_text,
+            upstream_protocol="openai",
+        )
+        return Response(openai_error_to_anthropic(error_text), status=status, mimetype="application/json")
+
+    if is_sse_response:
+        translator = AnthropicStreamTranslator(model=model_hint)
+
+        def generate():
+            for chunk in upstream.raw.stream(8192, decode_content=False):
+                if not chunk:
+                    continue
+                if state["ttfb_s"] is None:
+                    state["ttfb_s"] = time.monotonic() - t_start
+                    logger.info("── FIRST BYTE  ttfb=%.3fs", state["ttfb_s"])
+                state["raw_buffer"].append(chunk)
+                out = translator.feed(chunk)
+                if out:
+                    yield out
+
+            total_s = time.monotonic() - t_start
+            _executor.submit(
+                _persist, cfg=cfg, pool=pool, timestamp_utc=timestamp_utc, path=full_path,
+                is_stream=True, is_sse_response=True, request_body=openai_body,
+                request_json=openai_json, raw_buffer=state["raw_buffer"], content_encoding=content_encoding,
+                status=status, ttfb_s=state["ttfb_s"], total_s=total_s, error_body=None,
+                upstream_protocol="openai",
+            )
+
+        return Response(
+            stream_with_context(generate()), status=status, mimetype="text/event-stream",
+            headers={"cache-control": "no-cache"},
+        )
+
+    raw_response = upstream.raw.read(decode_content=False)
+    state["ttfb_s"] = time.monotonic() - t_start
+    state["raw_buffer"].append(raw_response)
+    total_s = time.monotonic() - t_start
+    full_raw = _decompress(raw_response, content_encoding)
+    try:
+        anthropic_resp = openai_response_to_anthropic(json.loads(full_raw))
+        out_body = json.dumps(anthropic_resp).encode()
+    except json.JSONDecodeError:
+        out_body = full_raw
+
+    _executor.submit(
+        _persist, cfg=cfg, pool=pool, timestamp_utc=timestamp_utc, path=full_path,
+        is_stream=False, is_sse_response=False, request_body=openai_body,
+        request_json=openai_json, raw_buffer=state["raw_buffer"], content_encoding=content_encoding,
+        status=status, ttfb_s=state["ttfb_s"], total_s=total_s, error_body=None,
+        upstream_protocol="openai",
+    )
+    return Response(out_body, status=status, mimetype="application/json")
 
 
 def _handle_openai(app: Flask) -> Response:
@@ -249,6 +400,21 @@ def _handle_openai(app: Flask) -> Response:
             status=400, mimetype="application/json",
         )
 
+    full_path = "/v1/chat/completions"
+    model_hint = openai_json.get("model") or "?"
+
+    try:
+        route = resolve_route(app.routes, model_hint)
+    except RuntimeError as exc:
+        logger.error("✗ ROUTING FAILED: %s", exc)
+        return Response(
+            json.dumps({"error": {"message": str(exc), "type": "invalid_request_error"}}),
+            status=502, mimetype="application/json",
+        )
+
+    if route.protocol == "openai":
+        return _handle_openai_passthrough(app, route, timestamp_utc, body, openai_json, full_path, model_hint)
+
     try:
         anthropic_json = openai_to_anthropic_request(openai_json)
     except Exception as exc:
@@ -261,17 +427,6 @@ def _handle_openai(app: Flask) -> Response:
     anthropic_body = json.dumps(anthropic_json).encode()
     is_stream = bool(anthropic_json.get("stream"))
     include_usage = bool((openai_json.get("stream_options") or {}).get("include_usage"))
-    model_hint = anthropic_json.get("model") or "?"
-    full_path = "/v1/chat/completions"
-
-    try:
-        route = resolve_route(app.routes, model_hint)
-    except RuntimeError as exc:
-        logger.error("✗ ROUTING FAILED: %s", exc)
-        return Response(
-            json.dumps({"error": {"message": str(exc), "type": "invalid_request_error"}}),
-            status=502, mimetype="application/json",
-        )
 
     logger.info(
         "── REQUEST  POST %s (openai-compat)  model=%s  upstream=%s(%s)  stream=%s  body=%db",
@@ -324,6 +479,7 @@ def _handle_openai(app: Flask) -> Response:
             is_stream=is_stream, is_sse_response=False, request_body=anthropic_body,
             request_json=anthropic_json, raw_buffer=state["raw_buffer"], content_encoding=content_encoding,
             status=status, ttfb_s=state["ttfb_s"], total_s=total_s, error_body=error_text,
+            upstream_protocol="anthropic",
         )
         return Response(anthropic_error_to_openai(error_text), status=status, mimetype="application/json")
 
@@ -348,6 +504,7 @@ def _handle_openai(app: Flask) -> Response:
                 is_stream=True, is_sse_response=True, request_body=anthropic_body,
                 request_json=anthropic_json, raw_buffer=state["raw_buffer"], content_encoding=content_encoding,
                 status=status, ttfb_s=state["ttfb_s"], total_s=total_s, error_body=None,
+                upstream_protocol="anthropic",
             )
 
         return Response(
@@ -371,8 +528,105 @@ def _handle_openai(app: Flask) -> Response:
         is_stream=False, is_sse_response=False, request_body=anthropic_body,
         request_json=anthropic_json, raw_buffer=state["raw_buffer"], content_encoding=content_encoding,
         status=status, ttfb_s=state["ttfb_s"], total_s=total_s, error_body=None,
+        upstream_protocol="anthropic",
     )
     return Response(out_body, status=status, mimetype="application/json")
+
+
+def _handle_openai_passthrough(
+    app: Flask,
+    route,
+    timestamp_utc: str,
+    body: bytes,
+    openai_json: dict,
+    full_path: str,
+    model_hint: str,
+) -> Response:
+    """OpenAI-shaped client routed to an openai-protocol upstream: pure passthrough, no
+    translation on either side (mirrors _handle's untranslated path, just for this entry point)."""
+    cfg: Config = app.config["cfg"]
+    fwd: Forwarder = app.forwarder
+    pool = app.db_pool
+
+    is_stream = bool(openai_json.get("stream", False))
+
+    logger.info(
+        "── REQUEST  POST %s (openai-passthrough)  model=%s  upstream=%s(%s)  stream=%s  body=%db",
+        full_path, model_hint, route.type, route.base_url, is_stream, len(body),
+    )
+
+    t_start = time.monotonic()
+    headers = filter_headers(request.headers)
+    headers["content-length"] = str(len(body))
+    upstream_url = route.base_url.rstrip("/") + full_path
+
+    try:
+        upstream = fwd.forward("POST", upstream_url, headers, body, route)
+    except RuntimeError as exc:
+        logger.error("✗ ROUTING FAILED: %s", exc)
+        return Response(
+            json.dumps({"error": {"message": str(exc), "type": "api_error"}}),
+            status=502, mimetype="application/json",
+        )
+    except requests.RequestException as exc:
+        logger.error("✗ UPSTREAM CONNECT FAILED: %s", exc)
+        return Response(
+            json.dumps({"error": {"message": str(exc), "type": "api_error"}}),
+            status=502, mimetype="application/json",
+        )
+
+    status = upstream.status_code
+    resp_headers = Forwarder.response_headers(upstream)
+    content_type = upstream.headers.get("content-type", "")
+    content_encoding = upstream.headers.get("content-encoding", "")
+    is_sse_response = "text/event-stream" in content_type
+
+    logger.info("── UPSTREAM  status=%d  content-type=%s", status, content_type)
+    if status >= 400:
+        logger.warning("✗ UPSTREAM ERROR  status=%d  path=%s", status, full_path)
+
+    state: dict = {"ttfb_s": None, "raw_buffer": [], "error_body": None}
+
+    def generate():
+        if is_sse_response:
+            for chunk in upstream.raw.stream(8192, decode_content=False):
+                if not chunk:
+                    continue
+                if state["ttfb_s"] is None:
+                    state["ttfb_s"] = time.monotonic() - t_start
+                    logger.info("── FIRST BYTE  ttfb=%.3fs", state["ttfb_s"])
+                state["raw_buffer"].append(chunk)
+                yield chunk
+        else:
+            raw_response = upstream.raw.read(decode_content=False)
+            state["ttfb_s"] = time.monotonic() - t_start
+            state["raw_buffer"].append(raw_response)
+            if status >= 400:
+                state["error_body"] = _decompress(raw_response, content_encoding).decode(errors="replace")
+                logger.error("✗ ERROR BODY: %s", state["error_body"][:500])
+            yield raw_response
+
+        total_s = time.monotonic() - t_start
+        _executor.submit(
+            _persist,
+            cfg=cfg,
+            pool=pool,
+            timestamp_utc=timestamp_utc,
+            path=full_path,
+            is_stream=is_stream,
+            is_sse_response=is_sse_response,
+            request_body=body,
+            request_json=openai_json,
+            raw_buffer=state["raw_buffer"],
+            content_encoding=content_encoding,
+            status=status,
+            ttfb_s=state["ttfb_s"],
+            total_s=total_s,
+            error_body=state["error_body"],
+            upstream_protocol="openai",
+        )
+
+    return Response(stream_with_context(generate()), status=status, headers=resp_headers)
 
 
 def create_app(cfg: Config) -> Flask:

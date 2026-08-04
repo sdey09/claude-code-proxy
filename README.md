@@ -83,18 +83,47 @@ evaluated top to bottom; the first pattern match wins:
 routes:
   - match: "ias-*"                    # any model prefixed ias- (corporate/internal)
     type: databricks
+    protocol: anthropic               # this upstream speaks Anthropic's /v1/messages shape
     base_url: "https://your-gateway.com/ai-gateway/anthropic"
     auth_header: "Authorization"      # optional: override this header on the outgoing request
     api_key_env: "DATABRICKS_TOKEN"   # optional: value comes from this env var (sent as "Bearer <value>")
 
+  - match: "gpt-*"                    # any model prefixed gpt- (real OpenAI, OpenRouter, vLLM, ...)
+    type: openai
+    protocol: openai                  # this upstream speaks OpenAI's /v1/chat/completions shape
+    base_url: "https://api.openai.com"
+    auth_header: "Authorization"
+    api_key_env: "OPENAI_API_KEY"
+
   - match: "*"                        # everything else
     type: anthropic
+    protocol: anthropic
     base_url: "https://api.anthropic.com"
 ```
 
 Omit `auth_header`/`api_key_env` on a route to pass the client's original auth headers through unchanged
 (e.g. Claude Code's own `ANTHROPIC_API_KEY`/OAuth token) — that's the right default for a direct Anthropic route.
 Add them when a route needs different credentials, like a Databricks personal access token.
+
+`protocol` declares which wire format **the upstream** speaks — `anthropic` (default, backward
+compatible with every existing config) or `openai`. It's independent of which entry point the
+client used:
+
+| Client hits | Upstream `protocol` | Behavior |
+|---|---|---|
+| `/v1/messages` | `anthropic` | Passthrough, byte-for-byte (Claude Code's normal path) |
+| `/v1/messages` | `openai` | Translate Anthropic request → OpenAI, forward, translate response back |
+| `/v1/chat/completions` | `anthropic` | Translate OpenAI request → Anthropic, forward, translate response back |
+| `/v1/chat/completions` | `openai` | Passthrough, no translation |
+
+In both directions the proxy also translates the auth header name (`x-api-key` ⇄
+`Authorization: Bearer`) whenever it's passing the client's own credentials through unchanged.
+
+One known fidelity gap: when translating a *streaming* Anthropic request onto an openai-protocol
+upstream, the initial `message_start` event can't report real `input_tokens` (OpenAI-compatible
+APIs only return usage once, at the end of the stream) — it's reported as `0` in the live stream.
+The persisted cost/token data in Postgres is unaffected: it's computed by parsing the raw upstream
+bytes directly, independent of what's shown to the streaming client.
 
 Each proxied request logs which route it took:
 
@@ -111,11 +140,14 @@ POST http://localhost:8888/v1/chat/completions
 GET  http://localhost:8888/v1/models
 ```
 
-Requests are translated OpenAI → Anthropic (`messages`, `system`, `tools`/`tool_choice`,
-`stream`, streaming tool-call deltas, etc.), routed through the same `upstreams.yaml` rules as
-Claude Code traffic, and the Anthropic response is translated back to OpenAI's shape — including
-incremental translation of streamed responses. Requests/responses are captured and costed exactly
-like `/v1/messages` traffic, just tagged with `path=/v1/chat/completions` in the dashboard.
+Requests are routed through the same `upstreams.yaml` rules as Claude Code traffic. If the
+matched route's upstream is `protocol: anthropic` (the default), the request is translated
+OpenAI → Anthropic (`messages`, `system`, `tools`/`tool_choice`, `stream`, streaming tool-call
+deltas, etc.) and the response translated back — including incremental translation of streamed
+responses. If the matched route is `protocol: openai`, the request passes straight through with
+no translation. Requests/responses are captured and costed exactly like `/v1/messages` traffic,
+just tagged with `path=/v1/chat/completions` in the dashboard. See [Routing](#routing) for the
+full translation matrix.
 
 Point an OpenAI client at it with `model` set to whatever `upstreams.yaml` matches (e.g.
 `claude-sonnet-5`), and `OPENAI_API_KEY`/`Authorization: Bearer <key>` — it's translated to

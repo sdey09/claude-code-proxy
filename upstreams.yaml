@@ -3,19 +3,35 @@
 #
 # type is a free-form label used for logging/observability, not behavior.
 #
+# protocol declares the wire format THIS UPSTREAM speaks: "anthropic" (default,
+# /v1/messages shape) or "openai" (/v1/chat/completions shape, e.g. real OpenAI,
+# OpenRouter, a local vLLM/Ollama server, or an OpenAI-compatible gateway).
+# The proxy translates as needed so either entry point (/v1/messages or
+# /v1/chat/completions) can route to either kind of upstream.
+#
 # auth_header / api_key_env are optional: set both to have the proxy replace
 # that header on the outgoing request with "Bearer <value of api_key_env>".
 # Omit them to pass the client's original auth headers through unchanged
 # (e.g. Claude Code's own ANTHROPIC_API_KEY / OAuth token, for direct
-# Anthropic routes).
+# Anthropic routes) -- the proxy still translates the header *name*
+# (x-api-key <-> Authorization: Bearer) to match the upstream's protocol.
 
 routes:
   - match: "ias-*"
     type: databricks
+    protocol: anthropic
     base_url: "https://your-gateway.com/ai-gateway/anthropic"
     auth_header: "Authorization"
     api_key_env: "DATABRICKS_TOKEN"
 
+  - match: "gpt-*"
+    type: openai
+    protocol: openai
+    base_url: "https://api.openai.com"
+    auth_header: "Authorization"
+    api_key_env: "OPENAI_API_KEY"
+
   - match: "*"
     type: anthropic
+    protocol: anthropic
     base_url: "https://api.anthropic.com"
