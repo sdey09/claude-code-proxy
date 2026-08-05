@@ -17,13 +17,6 @@
 # (x-api-key <-> Authorization: Bearer) to match the upstream's protocol.
 
 routes:
-  - match: "ias-*"
-    type: databricks
-    protocol: anthropic
-    base_url: "https://your-gateway.com/ai-gateway/anthropic"
-    auth_header: "Authorization"
-    api_key_env: "DATABRICKS_TOKEN"
-
   - match: "gpt-*"
     type: openai
     protocol: openai

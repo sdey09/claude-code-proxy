@@ -20,7 +20,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 import requests
-from flask import Flask, Response, redirect, request, stream_with_context, url_for
+from flask import Flask, Response, redirect, request, stream_with_context
 
 import db
 from config import Config
@@ -643,7 +643,7 @@ def create_app(cfg: Config) -> Flask:
 
     @app.route("/")
     def index():
-        return redirect(url_for("dashboard.requests_view"))
+        return redirect("/dashboard/requests")
 
     @app.route("/v1/chat/completions", methods=["POST"])
     def openai_chat_completions():

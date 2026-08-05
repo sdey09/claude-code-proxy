@@ -81,13 +81,6 @@ evaluated top to bottom; the first pattern match wins:
 
 ```yaml
 routes:
-  - match: "ias-*"                    # any model prefixed ias- (corporate/internal)
-    type: databricks
-    protocol: anthropic               # this upstream speaks Anthropic's /v1/messages shape
-    base_url: "https://your-gateway.com/ai-gateway/anthropic"
-    auth_header: "Authorization"      # optional: override this header on the outgoing request
-    api_key_env: "DATABRICKS_TOKEN"   # optional: value comes from this env var (sent as "Bearer <value>")
-
   - match: "gpt-*"                    # any model prefixed gpt- (real OpenAI, OpenRouter, vLLM, ...)
     type: openai
     protocol: openai                  # this upstream speaks OpenAI's /v1/chat/completions shape
@@ -188,6 +181,11 @@ Open http://localhost:8888/dashboard/requests for the custom UI:
 | `/dashboard/requests/<id>` | Full request/response JSON for a single call |
 | `/dashboard/costs` | Summary stats, cost-over-time chart, and cost-by-model breakdown |
 
+It's a React app (`frontend/`) built with Vite; `dashboard.py` serves the production build (`frontend/dist`) plus the
+JSON API it talks to (`/dashboard/api/...`). `start.sh` and the Dockerfile build it automatically. For active
+frontend development with hot reload, run `cd frontend && npm install && npm run dev` (proxies API calls to the
+proxy on `:8888`) instead of relying on the static build.
+
 ## Configuration
 
 All config via `.env` (or environment variables directly):
@@ -207,7 +205,7 @@ All config via `.env` (or environment variables directly):
 ```
 claude-code-local-observability/
 ├── proxy.py                  # Flask app: request handler + proxy entry point
-├── dashboard.py              # Flask blueprint: request log, detail, cost dashboard
+├── dashboard.py              # Flask blueprint: dashboard JSON API + SPA serving
 ├── openai_compat.py          # OpenAI Chat Completions ⇄ Anthropic Messages translation
 ├── forwarder.py              # Upstream HTTP client (requests), header handling
 ├── sse_accumulator.py        # SSE stream parser
@@ -216,9 +214,8 @@ claude-code-local-observability/
 ├── config.py                 # Environment variable config
 ├── routing.py                # Model → upstream routing table
 ├── upstreams.yaml            # Routing rules (Databricks, Anthropic, ...)
-├── templates/                # Dashboard Jinja templates
-├── static/                   # Dashboard CSS
-├── start.sh                  # Convenience script: starts Postgres + proxy
+├── frontend/                 # React dashboard (Vite) — builds to frontend/dist, served by dashboard.py
+├── start.sh                  # Convenience script: builds frontend, starts Postgres + proxy
 ├── .env                      # Local config (gitignored)
 ├── .env.example              # Template
 ├── docker-compose.yml        # Postgres + proxy

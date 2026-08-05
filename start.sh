@@ -10,6 +10,11 @@ export $(grep -v '^#' .env | xargs)
 echo "Starting Postgres..."
 docker compose up -d postgres
 
+if [ ! -d frontend/dist ]; then
+  echo "Building dashboard frontend..."
+  (cd frontend && npm install && npm run build)
+fi
+
 echo "Starting proxy on :${PROXY_PORT:-8888}..."
 uv run proxy.py &
 PROXY_PID=$!

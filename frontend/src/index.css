@@ -40,6 +40,7 @@ body {
 }
 
 .topnav a:hover { color: var(--text); }
+.topnav a.active { color: var(--text); }
 
 main {
   max-width: 1200px;
@@ -60,6 +61,7 @@ h2 { font-size: 1.05rem; margin-top: 2rem; color: var(--muted); }
 }
 
 .meta { color: var(--muted); font-size: 0.85rem; }
+.meta.err { color: var(--err); }
 
 .table-wrap { overflow-x: auto; }
 
