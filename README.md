@@ -32,7 +32,7 @@ Databricks AI Gateway, api.anthropic.com, or both. See [Routing](#routing) below
 ### 2. Start Postgres
 
 ```bash
-cd ~/Documents/dx/dev-scripts/claude-code-local-observability
+cd claude-code-local-observability
 make up
 ```
 
@@ -43,7 +43,7 @@ make up
 ### 3. Start the proxy
 
 ```bash
-cd ~/Documents/dx/dev-scripts/claude-code-local-observability
+cd claude-code-local-observability
 uv run proxy.py
 ```
 
