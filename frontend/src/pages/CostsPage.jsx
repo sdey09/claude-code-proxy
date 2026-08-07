@@ -3,6 +3,7 @@ import { getCosts } from "../api.js";
 import StatCards from "../components/StatCards.jsx";
 import CostChart from "../components/CostChart.jsx";
 import ModelTable from "../components/ModelTable.jsx";
+import FolderTable from "../components/FolderTable.jsx";
 
 export default function CostsPage() {
   const [data, setData] = useState(null);
@@ -35,6 +36,13 @@ export default function CostsPage() {
 
       <h2>Cost by model</h2>
       <ModelTable byModel={data.by_model} />
+
+      <h2>Cost by folder</h2>
+      <p className="meta">
+        Grouped by the directory of each file an Edit/Write/Read tool call touched. A request that touches multiple
+        folders in one turn is counted against each — folder totals can exceed the overall total.
+      </p>
+      <FolderTable byFolder={data.by_folder} />
     </>
   );
 }

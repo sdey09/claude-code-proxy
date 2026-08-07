@@ -216,6 +216,13 @@ def cost_by_model(pool: ThreadedConnectionPool) -> list[dict]:
             return list(cur.fetchall())
 
 
+def list_responses_for_folder_breakdown(pool: ThreadedConnectionPool) -> list[dict]:
+    with _conn(pool) as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("SELECT stream, response_body, cost_usd, input_tokens, output_tokens FROM requests")
+            return list(cur.fetchall())
+
+
 def cost_over_time(pool: ThreadedConnectionPool, days: int = 14) -> list[dict]:
     with _conn(pool) as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:

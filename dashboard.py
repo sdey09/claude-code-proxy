@@ -7,6 +7,7 @@ from pathlib import Path
 from flask import Blueprint, current_app, jsonify, request, send_from_directory
 
 import db
+import folders as folders_lib
 
 dashboard_bp = Blueprint("dashboard", __name__)
 
@@ -67,6 +68,7 @@ def api_costs():
         {
             "summary": summary,
             "by_model": by_model,
+            "by_folder": _folder_breakdown(pool),
             "series": {
                 "labels": [r["day"].strftime("%Y-%m-%d") for r in over_time],
                 "cost": [float(r["total_cost"]) for r in over_time],
@@ -74,6 +76,42 @@ def api_costs():
             },
         }
     )
+
+
+def _folder_breakdown(pool):
+    """Cost/token usage grouped by the directory of every file touched by an
+    Edit/MultiEdit/Write/Read/NotebookEdit tool call. A request that touches
+    multiple folders in one turn is counted against each of them, so folder
+    totals can exceed the overall total cost — this is a "where did the work
+    that cost X happen" view, not a strict cost ledger."""
+    rows = db.list_responses_for_folder_breakdown(pool)
+
+    stats: dict[str, dict] = {}
+    for r in rows:
+        folders = folders_lib.folders_touched(r.get("response_body"), bool(r.get("stream")))
+        if not folders:
+            continue
+        for f in folders:
+            s = stats.setdefault(f, {"folder": f, "request_count": 0, "cost": 0.0, "input_tokens": 0, "output_tokens": 0})
+            s["request_count"] += 1
+            s["cost"] += float(r.get("cost_usd") or 0)
+            s["input_tokens"] += int(r.get("input_tokens") or 0)
+            s["output_tokens"] += int(r.get("output_tokens") or 0)
+
+    prefix = folders_lib.common_prefix(list(stats.keys()))
+    result = [
+        {
+            "folder": folders_lib.relativize(s["folder"], prefix),
+            "full_path": s["folder"],
+            "request_count": s["request_count"],
+            "cost": s["cost"],
+            "input_tokens": s["input_tokens"],
+            "output_tokens": s["output_tokens"],
+        }
+        for s in stats.values()
+    ]
+    result.sort(key=lambda x: x["cost"], reverse=True)
+    return result
 
 
 @dashboard_bp.route("/")
