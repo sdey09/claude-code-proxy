@@ -1,4 +1,5 @@
 import { Link } from "react-router-dom";
+import StatusBadge from "./StatusBadge.jsx";
 
 function formatTimestamp(iso) {
   if (!iso) return "—";
@@ -41,7 +42,9 @@ export default function RequestsTable({ rows }) {
                 <Link to={`/requests/${r.id}`}>{formatTimestamp(r.timestamp_utc)}</Link>
               </td>
               <td>{r.model || "—"}</td>
-              <td>{r.status_code || "—"}</td>
+              <td>
+                <StatusBadge status={r.status_code} />
+              </td>
               <td>{r.input_tokens}</td>
               <td>{r.output_tokens}</td>
               <td>

@@ -34,6 +34,7 @@ CREATE TABLE IF NOT EXISTS requests (
 );
 CREATE INDEX IF NOT EXISTS idx_ts ON requests(timestamp_utc);
 CREATE INDEX IF NOT EXISTS idx_model ON requests(model);
+ALTER TABLE requests ADD COLUMN IF NOT EXISTS original_request_body TEXT;
 """
 
 
@@ -56,6 +57,7 @@ class RequestRecord:
     response_body: Optional[str]
     error_body: Optional[str]
     status_code: Optional[int]
+    original_request_body: Optional[str] = None
 
 
 def get_pool(database_url: str) -> ThreadedConnectionPool:
@@ -96,6 +98,7 @@ def insert_record(pool: ThreadedConnectionPool, rec: RequestRecord, max_body_byt
     data = asdict(rec)
     data["request_body"] = _trunc(rec.request_body)
     data["response_body"] = _trunc(rec.response_body)
+    data["original_request_body"] = _trunc(rec.original_request_body)
 
     sql = """
         INSERT INTO requests (
@@ -103,13 +106,13 @@ def insert_record(pool: ThreadedConnectionPool, rec: RequestRecord, max_body_byt
             ttfb_s, total_s,
             input_tokens, output_tokens, cache_write_tokens, cache_read_tokens,
             cost_usd, stop_reason,
-            request_body, response_body, error_body, status_code
+            request_body, response_body, error_body, status_code, original_request_body
         ) VALUES (
             %(request_id)s, %(timestamp_utc)s, %(model)s, %(path)s, %(stream)s,
             %(ttfb_s)s, %(total_s)s,
             %(input_tokens)s, %(output_tokens)s, %(cache_write_tokens)s, %(cache_read_tokens)s,
             %(cost_usd)s, %(stop_reason)s,
-            %(request_body)s, %(response_body)s, %(error_body)s, %(status_code)s
+            %(request_body)s, %(response_body)s, %(error_body)s, %(status_code)s, %(original_request_body)s
         )
     """
     try:

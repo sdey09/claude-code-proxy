@@ -1,14 +1,14 @@
 import { Navigate, Route, Routes } from "react-router-dom";
-import Nav from "./components/Nav.jsx";
+import Sidebar from "./components/Sidebar.jsx";
 import RequestsPage from "./pages/RequestsPage.jsx";
 import RequestDetailPage from "./pages/RequestDetailPage.jsx";
 import CostsPage from "./pages/CostsPage.jsx";
 
 export default function App() {
   return (
-    <>
-      <Nav />
-      <main>
+    <div className="layout">
+      <Sidebar />
+      <main className="content">
         <Routes>
           <Route path="/" element={<Navigate to="/requests" replace />} />
           <Route path="/requests" element={<RequestsPage />} />
@@ -16,6 +16,6 @@ export default function App() {
           <Route path="/costs" element={<CostsPage />} />
         </Routes>
       </main>
-    </>
+    </div>
   );
 }

@@ -51,6 +51,7 @@ def api_request_detail(req_id):
             "row": _serialize_row(row),
             "request_body": _pretty_json(row.get("request_body")),
             "response_body": _pretty_json(row.get("response_body")),
+            "original_request_body": _pretty_json(row.get("original_request_body")),
         }
     )
 

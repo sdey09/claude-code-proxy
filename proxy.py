@@ -78,6 +78,7 @@ def _persist(
     total_s: float,
     error_body: Optional[str],
     upstream_protocol: str,
+    original_request_body: Optional[bytes] = None,
 ) -> None:
     full_raw = _decompress(b"".join(raw_buffer), content_encoding)
 
@@ -122,6 +123,7 @@ def _persist(
         response_body=response_body_str,
         error_body=error_body,
         status_code=status,
+        original_request_body=original_request_body.decode(errors="replace") if original_request_body else None,
     )
 
     db.insert_record(pool, rec, cfg.max_body_store_bytes)
@@ -327,7 +329,7 @@ def _handle_anthropic_over_openai_upstream(
             is_stream=is_stream, is_sse_response=False, request_body=openai_body,
             request_json=openai_json, raw_buffer=state["raw_buffer"], content_encoding=content_encoding,
             status=status, ttfb_s=state["ttfb_s"], total_s=total_s, error_body=error_text,
-            upstream_protocol="openai",
+            upstream_protocol="openai", original_request_body=body,
         )
         return Response(openai_error_to_anthropic(error_text), status=status, mimetype="application/json")
 
@@ -352,7 +354,7 @@ def _handle_anthropic_over_openai_upstream(
                 is_stream=True, is_sse_response=True, request_body=openai_body,
                 request_json=openai_json, raw_buffer=state["raw_buffer"], content_encoding=content_encoding,
                 status=status, ttfb_s=state["ttfb_s"], total_s=total_s, error_body=None,
-                upstream_protocol="openai",
+                upstream_protocol="openai", original_request_body=body,
             )
 
         return Response(
@@ -376,7 +378,7 @@ def _handle_anthropic_over_openai_upstream(
         is_stream=False, is_sse_response=False, request_body=openai_body,
         request_json=openai_json, raw_buffer=state["raw_buffer"], content_encoding=content_encoding,
         status=status, ttfb_s=state["ttfb_s"], total_s=total_s, error_body=None,
-        upstream_protocol="openai",
+        upstream_protocol="openai", original_request_body=body,
     )
     return Response(out_body, status=status, mimetype="application/json")
 
@@ -479,7 +481,7 @@ def _handle_openai(app: Flask) -> Response:
             is_stream=is_stream, is_sse_response=False, request_body=anthropic_body,
             request_json=anthropic_json, raw_buffer=state["raw_buffer"], content_encoding=content_encoding,
             status=status, ttfb_s=state["ttfb_s"], total_s=total_s, error_body=error_text,
-            upstream_protocol="anthropic",
+            upstream_protocol="anthropic", original_request_body=body,
         )
         return Response(anthropic_error_to_openai(error_text), status=status, mimetype="application/json")
 
@@ -504,7 +506,7 @@ def _handle_openai(app: Flask) -> Response:
                 is_stream=True, is_sse_response=True, request_body=anthropic_body,
                 request_json=anthropic_json, raw_buffer=state["raw_buffer"], content_encoding=content_encoding,
                 status=status, ttfb_s=state["ttfb_s"], total_s=total_s, error_body=None,
-                upstream_protocol="anthropic",
+                upstream_protocol="anthropic", original_request_body=body,
             )
 
         return Response(
@@ -528,7 +530,7 @@ def _handle_openai(app: Flask) -> Response:
         is_stream=False, is_sse_response=False, request_body=anthropic_body,
         request_json=anthropic_json, raw_buffer=state["raw_buffer"], content_encoding=content_encoding,
         status=status, ttfb_s=state["ttfb_s"], total_s=total_s, error_body=None,
-        upstream_protocol="anthropic",
+        upstream_protocol="anthropic", original_request_body=body,
     )
     return Response(out_body, status=status, mimetype="application/json")
 
