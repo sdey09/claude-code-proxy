@@ -3,6 +3,7 @@ import { Link, useParams } from "react-router-dom";
 import { getRequest } from "../api.js";
 import StatusBadge from "../components/StatusBadge.jsx";
 import DiffView from "../components/DiffView.jsx";
+import MessageBody from "../components/MessageBody.jsx";
 
 function fmt(value, digits) {
   return value === null || value === undefined ? "—" : `${value.toFixed(digits)}s`;
@@ -116,11 +117,11 @@ export default function RequestDetailPage() {
       {wasTranslated ? (
         <DiffView before={original_request_body} after={request_body} />
       ) : (
-        <pre className="body-block">{request_body || "(empty)"}</pre>
+        <MessageBody raw={request_body} />
       )}
 
       <h2>Response Body</h2>
-      <pre className="body-block">{response_body || "(empty)"}</pre>
+      <MessageBody raw={response_body} />
     </>
   );
 }
