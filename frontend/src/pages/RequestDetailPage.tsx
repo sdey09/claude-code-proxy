@@ -1,10 +1,8 @@
-import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
-import { getRequest } from "../api";
 import StatusBadge from "../components/StatusBadge";
 import DiffView from "../components/DiffView";
 import MessageBody from "../components/MessageBody";
-import type { RequestDetailResponse } from "../types";
+import { useRequestQuery } from "../queries";
 
 function fmt(value: number | null | undefined, digits: number) {
   return value === null || value === undefined ? "—" : `${value.toFixed(digits)}s`;
@@ -12,24 +10,7 @@ function fmt(value: number | null | undefined, digits: number) {
 
 export default function RequestDetailPage() {
   const { id } = useParams<{ id: string }>();
-  const [data, setData] = useState<RequestDetailResponse | null>(null);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    let cancelled = false;
-    setData(null);
-    setError(null);
-    getRequest(id!)
-      .then((d) => {
-        if (!cancelled) setData(d);
-      })
-      .catch((e) => {
-        if (!cancelled) setError(e.message);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [id]);
+  const { data, error } = useRequestQuery(id!);
 
   if (error) {
     return (
@@ -39,7 +20,7 @@ export default function RequestDetailPage() {
             ← Back to requests
           </Link>
         </p>
-        <p className="text-sm text-err">{error}</p>
+        <p className="text-sm text-err">{error.message}</p>
       </>
     );
   }
@@ -124,11 +105,11 @@ export default function RequestDetailPage() {
       {wasTranslated ? (
         <DiffView before={original_request_body} after={request_body} />
       ) : (
-        <MessageBody raw={request_body} />
+        <MessageBody raw={request_body} bodyKey={`${row.id}:request`} />
       )}
 
       <h2 className="mt-8 text-lg text-muted">Response Body</h2>
-      <MessageBody raw={response_body} />
+      <MessageBody raw={response_body} bodyKey={`${row.id}:response`} />
     </>
   );
 }

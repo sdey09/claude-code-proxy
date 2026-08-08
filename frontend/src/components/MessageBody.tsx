@@ -1,8 +1,8 @@
-import { useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import DiffView from "./DiffView";
 import Collapsible from "./Collapsible";
+import { useUiStore } from "../store/uiStore";
 
 const COLLAPSE_THRESHOLD = 500;
 
@@ -239,8 +239,14 @@ function metaValue(v: unknown): string {
   return s.length > 160 ? s.slice(0, 160) + "…" : s;
 }
 
-export default function MessageBody({ raw }: { raw: string | null | undefined }) {
-  const [showRaw, setShowRaw] = useState(false);
+interface MessageBodyProps {
+  raw: string | null | undefined;
+  bodyKey: string;
+}
+
+export default function MessageBody({ raw, bodyKey }: MessageBodyProps) {
+  const showRaw = useUiStore((s) => s.showRawByKey[bodyKey] ?? false);
+  const toggleShowRaw = useUiStore((s) => s.toggleShowRaw);
 
   if (!raw) return <pre className={BODY_BLOCK}>(empty)</pre>;
 
@@ -283,7 +289,7 @@ export default function MessageBody({ raw }: { raw: string | null | undefined })
       <button
         type="button"
         className="self-start rounded-md border border-border px-2.5 py-1.5 text-xs text-muted hover:border-accent hover:text-text"
-        onClick={() => setShowRaw((s) => !s)}
+        onClick={() => toggleShowRaw(bodyKey)}
       >
         {showRaw ? "Hide raw JSON" : "Show raw JSON"}
       </button>

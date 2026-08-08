@@ -1,30 +1,13 @@
-import { useEffect, useState } from "react";
-import { getCosts } from "../api";
 import StatCards from "../components/StatCards";
 import CostChart from "../components/CostChart";
 import ModelTable from "../components/ModelTable";
 import FolderTable from "../components/FolderTable";
-import type { CostsResponse } from "../types";
+import { useCostsQuery } from "../queries";
 
 export default function CostsPage() {
-  const [data, setData] = useState<CostsResponse | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const { data, error } = useCostsQuery();
 
-  useEffect(() => {
-    let cancelled = false;
-    getCosts()
-      .then((d) => {
-        if (!cancelled) setData(d);
-      })
-      .catch((e) => {
-        if (!cancelled) setError(e.message);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  if (error) return <p className="text-sm text-err">{error}</p>;
+  if (error) return <p className="text-sm text-err">{error.message}</p>;
   if (!data) return null;
 
   return (
