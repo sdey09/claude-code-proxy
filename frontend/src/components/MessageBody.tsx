@@ -1,38 +1,105 @@
 import { useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import DiffView from "./DiffView.jsx";
-import Collapsible from "./Collapsible.jsx";
+import DiffView from "./DiffView";
+import Collapsible from "./Collapsible";
 
 const COLLAPSE_THRESHOLD = 500;
 
-function RoleBadge({ role }) {
-  const cls = role === "user" ? "role-user" : role === "assistant" ? "role-assistant" : "role-other";
-  return <span className={`role-badge ${cls}`}>{role}</span>;
+const BODY_BLOCK = "rounded-lg border border-border bg-panel p-4 overflow-x-auto text-[0.8rem] whitespace-pre-wrap break-words";
+const MSG_CODE = "m-0 text-[0.78rem] whitespace-pre-wrap break-words max-h-80 overflow-y-auto";
+
+const ROLE_TONES = {
+  user: "bg-accent/14 text-accent",
+  assistant: "bg-ok/14 text-ok",
+  other: "bg-muted/14 text-muted",
+};
+
+const PROSE =
+  "prose prose-sm prose-invert max-w-none text-[0.85rem] leading-relaxed " +
+  "prose-headings:text-text prose-headings:font-medium " +
+  "prose-a:text-accent prose-a:no-underline hover:prose-a:underline " +
+  "prose-strong:text-text " +
+  "prose-code:text-text prose-code:bg-bg prose-code:border prose-code:border-border prose-code:rounded prose-code:px-1.5 prose-code:py-0.5 prose-code:before:content-none prose-code:after:content-none " +
+  "prose-pre:bg-bg prose-pre:border prose-pre:border-border " +
+  "prose-blockquote:border-l-border prose-blockquote:text-muted prose-blockquote:font-normal " +
+  "prose-hr:border-border " +
+  "prose-th:border prose-th:border-border prose-td:border prose-td:border-border";
+
+// Message bodies are arbitrary, provider-shaped JSON — this describes the
+// superset of fields we know how to render, not a strict discriminated union.
+interface ContentBlockData {
+  type?: string;
+  text?: string;
+  thinking?: string;
+  name?: string;
+  input?: Record<string, unknown>;
+  content?: unknown;
+  is_error?: boolean;
 }
 
-function Markdown({ text }) {
+type MessageContentValue = string | ContentBlockData[] | Record<string, unknown> | null | undefined;
+
+interface ParsedMessage {
+  role?: string;
+  content?: MessageContentValue;
+}
+
+interface ParsedBody {
+  messages?: ParsedMessage[];
+  system?: MessageContentValue;
+  content?: MessageContentValue;
+  role?: string;
+  [key: string]: unknown;
+}
+
+interface EditInput {
+  old_string?: string;
+  new_string?: string;
+  file_path?: string;
+}
+
+interface MultiEditEdit {
+  old_string?: string;
+  new_string?: string;
+}
+
+interface MultiEditInput {
+  file_path?: string;
+  edits?: MultiEditEdit[];
+}
+
+function RoleBadge({ role }: { role: string }) {
+  const tone = role === "user" ? ROLE_TONES.user : role === "assistant" ? ROLE_TONES.assistant : ROLE_TONES.other;
   return (
-    <div className="msg-markdown">
+    <span className={`inline-block rounded-full px-2.5 py-0.5 text-[0.7rem] font-semibold uppercase tracking-wide ${tone}`}>{role}</span>
+  );
+}
+
+function Markdown({ text }: { text: string | null | undefined }) {
+  return (
+    <div className={PROSE}>
       <ReactMarkdown remarkPlugins={[remarkGfm]}>{text || ""}</ReactMarkdown>
     </div>
   );
 }
 
-function preview(text, n = 80) {
+function preview(text: string | null | undefined, n = 80) {
   const clean = (text || "").replace(/\s+/g, " ").trim();
   return clean.length > n ? clean.slice(0, n) + "…" : clean;
 }
 
-function toolResultText(content) {
+function toolResultText(content: unknown): string {
   if (typeof content === "string") return content;
   if (Array.isArray(content)) {
-    return content.map((b) => (typeof b === "string" ? b : b.text ?? JSON.stringify(b, null, 2))).join("\n");
+    return content
+      .map((b) => (typeof b === "string" ? b : ((b as { text?: string })?.text ?? JSON.stringify(b, null, 2))))
+      .join("\n");
   }
   return JSON.stringify(content, null, 2);
 }
 
-function ContentBlock({ block }) {
+function ContentBlock({ block }: { block: string | ContentBlockData }) {
   if (typeof block === "string") {
     return (
       <Collapsible variant="block" title="text" meta={preview(block)} defaultOpen={block.length <= COLLAPSE_THRESHOLD}>
@@ -58,7 +125,7 @@ function ContentBlock({ block }) {
       const text = block.thinking || "";
       return (
         <Collapsible variant="block" title="thinking" meta={preview(text)} defaultOpen={text.length <= COLLAPSE_THRESHOLD}>
-          <pre className="msg-code">{text}</pre>
+          <pre className={MSG_CODE}>{text}</pre>
         </Collapsible>
       );
     }
@@ -66,18 +133,21 @@ function ContentBlock({ block }) {
     case "tool_use": {
       const input = block.input || {};
       if (block.name === "Edit" && typeof input.old_string === "string") {
+        const editInput = input as unknown as EditInput;
         return (
-          <Collapsible variant="block" title={`Edit · ${input.file_path || "?"}`}>
-            <DiffView bare before={input.old_string} after={input.new_string} />
+          <Collapsible variant="block" title={`Edit · ${editInput.file_path || "?"}`}>
+            <DiffView bare before={editInput.old_string} after={editInput.new_string} />
           </Collapsible>
         );
       }
       if (block.name === "MultiEdit" && Array.isArray(input.edits)) {
+        const multiInput = input as unknown as MultiEditInput;
+        const edits = multiInput.edits ?? [];
         return (
-          <Collapsible variant="block" title={`MultiEdit · ${input.file_path || "?"}`} meta={`${input.edits.length} edits`}>
-            <div className="msg-blocks">
-              {input.edits.map((e, i) => (
-                <Collapsible key={i} variant="block" title={`Edit ${i + 1}/${input.edits.length}`}>
+          <Collapsible variant="block" title={`MultiEdit · ${multiInput.file_path || "?"}`} meta={`${edits.length} edits`}>
+            <div className="flex flex-col gap-2.5">
+              {edits.map((e, i) => (
+                <Collapsible key={i} variant="block" title={`Edit ${i + 1}/${edits.length}`}>
                   <DiffView bare before={e.old_string} after={e.new_string} />
                 </Collapsible>
               ))}
@@ -93,7 +163,7 @@ function ContentBlock({ block }) {
           meta={preview(text, 60)}
           defaultOpen={text.length <= COLLAPSE_THRESHOLD}
         >
-          <pre className="msg-code">{text}</pre>
+          <pre className={MSG_CODE}>{text}</pre>
         </Collapsible>
       );
     }
@@ -108,13 +178,13 @@ function ContentBlock({ block }) {
           meta={preview(text, 60)}
           defaultOpen={text.length <= COLLAPSE_THRESHOLD}
         >
-          <pre className="msg-code">{text}</pre>
+          <pre className={MSG_CODE}>{text}</pre>
         </Collapsible>
       );
     }
 
     case "image":
-      return <div className="msg-placeholder">[image]</div>;
+      return <div className="text-[0.8rem] italic text-muted">[image]</div>;
 
     default: {
       const text = JSON.stringify(block, null, 2);
@@ -125,19 +195,19 @@ function ContentBlock({ block }) {
           meta={preview(text, 60)}
           defaultOpen={text.length <= COLLAPSE_THRESHOLD}
         >
-          <pre className="msg-code">{text}</pre>
+          <pre className={MSG_CODE}>{text}</pre>
         </Collapsible>
       );
     }
   }
 }
 
-function MessageContent({ content }) {
+function MessageContent({ content }: { content: MessageContentValue }) {
   if (content == null) return null;
   if (typeof content === "string" || Array.isArray(content)) {
-    const blocks = typeof content === "string" ? [content] : content;
+    const blocks: (string | ContentBlockData)[] = typeof content === "string" ? [content] : content;
     return (
-      <div className="msg-blocks">
+      <div className="flex flex-col gap-2.5">
         {blocks.map((b, i) => (
           <ContentBlock key={i} block={b} />
         ))}
@@ -147,12 +217,12 @@ function MessageContent({ content }) {
   const text = JSON.stringify(content, null, 2);
   return (
     <Collapsible variant="block" title="content" meta={preview(text, 60)} defaultOpen={text.length <= COLLAPSE_THRESHOLD}>
-      <pre className="msg-code">{text}</pre>
+      <pre className={MSG_CODE}>{text}</pre>
     </Collapsible>
   );
 }
 
-function messageSummary(content) {
+function messageSummary(content: MessageContentValue): string {
   if (typeof content === "string") return preview(content, 100);
   if (Array.isArray(content)) {
     const firstText = content.find((b) => typeof b === "string" || b.type === "text");
@@ -164,17 +234,17 @@ function messageSummary(content) {
   return "";
 }
 
-function metaValue(v) {
+function metaValue(v: unknown): string {
   const s = typeof v === "object" ? JSON.stringify(v) : String(v);
   return s.length > 160 ? s.slice(0, 160) + "…" : s;
 }
 
-export default function MessageBody({ raw }) {
+export default function MessageBody({ raw }: { raw: string | null | undefined }) {
   const [showRaw, setShowRaw] = useState(false);
 
-  if (!raw) return <pre className="body-block">(empty)</pre>;
+  if (!raw) return <pre className={BODY_BLOCK}>(empty)</pre>;
 
-  let parsed = null;
+  let parsed: ParsedBody | null = null;
   try {
     parsed = JSON.parse(raw);
   } catch {
@@ -184,13 +254,13 @@ export default function MessageBody({ raw }) {
   const structured =
     parsed && typeof parsed === "object" && !Array.isArray(parsed) && (Array.isArray(parsed.messages) || Array.isArray(parsed.content));
 
-  if (!structured) return <pre className="body-block">{raw}</pre>;
+  if (!structured || !parsed) return <pre className={BODY_BLOCK}>{raw}</pre>;
 
   const messages = Array.isArray(parsed.messages) ? parsed.messages : [{ role: parsed.role || "assistant", content: parsed.content }];
   const metaEntries = Object.entries(parsed).filter(([k]) => !["messages", "system", "content", "role"].includes(k));
 
   return (
-    <div className="message-body">
+    <div className="flex flex-col gap-3">
       {parsed.system && (
         <Collapsible variant="card" title={<RoleBadge role="system" />} meta={messageSummary(parsed.system)}>
           <MessageContent content={parsed.system} />
@@ -202,18 +272,22 @@ export default function MessageBody({ raw }) {
         </Collapsible>
       ))}
       {metaEntries.length > 0 && (
-        <div className="msg-meta">
+        <div className="flex flex-wrap gap-x-4 gap-y-1.5 text-xs text-muted">
           {metaEntries.map(([k, v]) => (
-            <span className="msg-meta-item" key={k}>
-              <strong>{k}</strong>: {metaValue(v)}
+            <span key={k}>
+              <strong className="font-medium text-text">{k}</strong>: {metaValue(v)}
             </span>
           ))}
         </div>
       )}
-      <button type="button" className="raw-toggle" onClick={() => setShowRaw((s) => !s)}>
+      <button
+        type="button"
+        className="self-start rounded-md border border-border px-2.5 py-1.5 text-xs text-muted hover:border-accent hover:text-text"
+        onClick={() => setShowRaw((s) => !s)}
+      >
         {showRaw ? "Hide raw JSON" : "Show raw JSON"}
       </button>
-      {showRaw && <pre className="body-block">{raw}</pre>}
+      {showRaw && <pre className={BODY_BLOCK}>{raw}</pre>}
     </div>
   );
 }

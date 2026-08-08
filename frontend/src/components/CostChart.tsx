@@ -11,6 +11,7 @@ import {
   Tooltip,
 } from "chart.js";
 import { Chart } from "react-chartjs-2";
+import type { CostSeries } from "../types";
 
 ChartJS.register(
   BarController,
@@ -24,19 +25,23 @@ ChartJS.register(
   Tooltip
 );
 
-export default function CostChart({ series }) {
+interface CostChartProps {
+  series: CostSeries;
+}
+
+export default function CostChart({ series }: CostChartProps) {
   const data = {
     labels: series.labels,
     datasets: [
       {
-        type: "bar",
+        type: "bar" as const,
         label: "Cost (USD)",
         data: series.cost,
         backgroundColor: "#7c9cff",
         yAxisID: "y",
       },
       {
-        type: "line",
+        type: "line" as const,
         label: "Requests",
         data: series.count,
         borderColor: "#f2a154",
@@ -50,10 +55,10 @@ export default function CostChart({ series }) {
   const options = {
     responsive: true,
     scales: {
-      y: { beginAtZero: true, position: "left", title: { display: true, text: "USD" } },
+      y: { beginAtZero: true, position: "left" as const, title: { display: true, text: "USD" } },
       y1: {
         beginAtZero: true,
-        position: "right",
+        position: "right" as const,
         grid: { drawOnChartArea: false },
         title: { display: true, text: "Requests" },
       },

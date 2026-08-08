@@ -1,17 +1,21 @@
+import type { DiffRow } from "../types";
+
 // Myers diff (O((N+M)D) time/space, D = edit distance). Efficient for large,
 // mostly-similar texts like consecutive request bodies in a growing conversation
 // — unlike a plain O(N*M) DP table, which chokes once bodies reach thousands of lines.
 const MAX_DEPTH = 4000;
 
-export function diffLines(oldText, newText) {
+type VMap = Record<number, number>;
+
+export function diffLines(oldText: string, newText: string): DiffRow[] | null {
   const a = oldText.split("\n");
   const b = newText.split("\n");
   const n = a.length;
   const m = b.length;
 
   const max = Math.min(n + m, MAX_DEPTH * 2);
-  const v = { 1: 0 };
-  const trace = [];
+  const v: VMap = { 1: 0 };
+  const trace: VMap[] = [];
   let solved = -1;
 
   outer: for (let d = 0; d <= max; d++) {
@@ -38,7 +42,7 @@ export function diffLines(oldText, newText) {
 
   if (solved === -1) return null;
 
-  const result = [];
+  const result: DiffRow[] = [];
   let x = n;
   let y = m;
   for (let d = solved; d > 0; d--) {
